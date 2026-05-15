@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Amazon SP-API Schema 解析器 & 验证器</title>
+    <!-- 引入基础样式和 Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <!-- 引入 ref-parser (使用 ESM 模块导入，确保浏览器兼容性) -->
+    <script type="module">
+        import $RefParser from 'https://cdn.jsdelivr.net/npm/@apidevtools/json-schema-ref-parser/+esm';
+        window.$RefParser = $RefParser;
+        // 通知系统库已就绪
+        window.dispatchEvent(new CustomEvent('ref-parser-ready'));
+    </script>
+    <script>
+        // 兼容性助手
+        window.getRefParser = () => window.$RefParser;
+    </script>
+    <style>
+        :root {
+            --primary-color: #ff9900; /* Amazon Orange */
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border-color: #334155;
+            --accent-color: #38bdf8;
+            --error-color: #ef4444;
+            --success-color: #10b981;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            line-height: 1.6;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Header */
+        header {
+            padding: 1.5rem 2rem;
+            background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 10;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            background: linear-gradient(to right, var(--primary-color), #fbbf24);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .upload-section {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            font-size: 0.875rem;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: #000;
+        }
+
+        .btn-primary:hover {
+            background-color: #e68a00;
+            transform: translateY(-1px);
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .file-input-wrapper input[type=file] {
+            font-size: 100px;
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        /* Layout */
+        main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            overflow: hidden;
+            border-right: 1px solid var(--border-color);
+        }
+
+        .pane-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .filter-options {
+            display: flex;
+            gap: 1rem;
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        .filter-label {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            cursor: pointer;
+            font-size: 0.75rem;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .form-group.is-required {
+            border-left: 3px solid var(--primary-color);
+            padding-left: 1rem;
+            background: rgba(255, 153, 0, 0.02);
+        }
+
+        .scroll-area {
+            flex: 1;
+            overflow-y: auto;
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 1.5rem;
+            border: 1px solid var(--border-color);
+        }
+
+        /* JSON Tree Style */
+        pre {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.8rem;
+            color: #e2e8f0;
+            white-space: pre-wrap;
+        }
+
+        .string { color: #a5d6ff; }
+        .number { color: #d2a8ff; }
+        .boolean { color: #ffab70; }
+        .null { color: #ff7b72; }
+        .key { color: #79c0ff; }
+
+        /* Recursive Layout Styles */
+        .root-group {
+            background: rgba(255, 255, 255, 0.02);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 1.5rem;
+        }
+        .nested-group {
+            margin-top: 1rem;
+            padding-left: 1rem;
+            border-left: 2px solid var(--border-color);
+            margin-bottom: 0.5rem;
+        }
+        .array-item {
+            margin-top: 0.5rem;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 0.8rem;
+            border-radius: 6px;
+        }
+        .object-container {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        .form-label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .required-star {
+            color: var(--error-color);
+            margin-left: 4px;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: #0f172a;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: white;
+            font-size: 0.9rem;
+            transition: border-color 0.2s;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(255, 153, 0, 0.2);
+        }
+
+        .form-desc {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 0.4rem;
+        }
+
+        .hybrid-badge {
+            font-size: 10px;
+            background: rgba(56, 189, 248, 0.2);
+            color: var(--accent-color);
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        .empty-state svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 1rem;
+            opacity: 0.5;
+        }
+
+        /* Loading Overlay */
+        #loader {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(4px);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 153, 0, 0.1);
+            border-top: 3px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">
+        <div class="spinner"></div>
+    </div>
+
+    <header>
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+            <h1>Amazon Schema Parser Pro <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted); margin-left: 10px;">Senior Frontend Tool</span></h1>
+            <div id="schemaMeta" style="font-size: 0.85rem; color: var(--accent-color); font-weight: 500;"></div>
+        </div>
+        <div id="statusInfo" style="color: var(--text-muted); font-size: 0.85rem;"></div>
+        <div class="upload-section">
+            <div class="file-input-wrapper">
+                <button class="btn btn-primary">选择 Schema JSON 文件</button>
+                <input type="file" id="fileInput" accept=".json">
+            </div>
+            <button id="parseBtn" class="btn btn-primary" style="background: var(--accent-color);" disabled>开始解析</button>
+        </div>
+    </header>
+
+    <main>
+        <!-- 左侧：扁平化后的 JSON 结构 -->
+        <div class="pane">
+            <div class="pane-title">
+                <span>Flattened JSON Structure</span>
+                <span id="fieldCount" style="color: var(--accent-color);">0 Fields</span>
+            </div>
+            <div class="scroll-area" id="jsonViewer">
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>
+                    <p>等待上传文件并解析...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：表单预览 -->
+        <div class="pane">
+            <div class="pane-title">
+                Form Preview
+                <div class="filter-options">
+                    <label class="filter-label">
+                        <input type="checkbox" id="showRequiredOnly"> Only Required
+                    </label>
+                </div>
+            </div>
+            <div class="scroll-area" id="formPreview">
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        /**
+         * Senior Frontend Engineer Solution for Amazon SP-API Schema Parsing
+         */
+
+        const fileInput = document.getElementById('fileInput');
+        const parseBtn = document.getElementById('parseBtn');
+        const jsonViewer = document.getElementById('jsonViewer');
+        const formPreview = document.getElementById('formPreview');
+        const fieldCountEl = document.getElementById('fieldCount');
+        const loader = document.getElementById('loader');
+        const statusInfo = document.getElementById('statusInfo');
+        const schemaMeta = document.getElementById('schemaMeta');
+        const showRequiredOnly = document.getElementById('showRequiredOnly');
+
+        let rawSchema = null;
+        let allSchema = null;
+        let schemaRules = [];
+        let formValues = {};
+
+        // 核心初始化：等待库加载并尝试自动解析
+        window.addEventListener('DOMContentLoaded', async () => {
+            const tryInit = async () => {
+                if (!window.getRefParser()) {
+                    window.addEventListener('ref-parser-ready', tryInit, { once: true });
+                    return;
+                }
+                
+                try {
+                    statusInfo.innerText = '正在尝试自动加载本地 amz-jsonschema.json...';
+                    // 添加时间戳防止缓存
+                    const response = await fetch(`./amz-jsonschema.json?t=${Date.now()}`);
+                    console.log('Fetch response status:', response.status);
+                    
+                    if (response.ok) {
+                        const content = await response.json();
+                        console.log('File content loaded successfully');
+                        processRawContent(content);
+                        statusInfo.innerText = '✅ 已自动加载本地 amz-jsonschema.json';
+                        statusInfo.style.color = 'var(--success-color, #4ade80)';
+                        handleParse();
+                    } else {
+                        throw new Error(`HTTP Error ${response.status}`);
+                    }
+                } catch (err) {
+                    console.log('自动加载不可用:', err.message);
+                    statusInfo.innerText = '💡 请点击下方按钮手动选择本地的 amz-jsonschema.json 文件';
+                }
+            };
+
+            tryInit();
+        });
+
+        function processRawContent(content) {
+            try {
+                console.log('Processing content, root keys:', Object.keys(content));
+                
+                // 提取元数据
+                if (content.result && content.result.productType) {
+                    const pt = content.result.productType;
+                    schemaMetadata = {
+                        displayName: pt.displayName || 'Unknown',
+                        id: pt.productTypeUniqueId || ''
+                    };
+                    schemaMeta.innerText = `📦 Product Type: ${schemaMetadata.displayName} (${schemaMetadata.id})`;
+                } else {
+                    schemaMeta.innerText = '';
+                }
+
+                // 适配 Amazon SP-API 导出的原始 JSON 格式 (内嵌在 properties 字符串中)
+                if (content.result && content.result.productType && content.result.productType.properties) {
+                    rawSchema = JSON.parse(content.result.productType.properties);
+                } else if (content.properties && typeof content.properties === 'string') {
+                    rawSchema = JSON.parse(content.properties);
+                } else {
+                    rawSchema = content;
+                }
+                
+                console.log('Schema extracted, version:', rawSchema.$schema);
+                parseBtn.disabled = false;
+            } catch (err) {
+                console.error('Content processing failed:', err);
+                alert('JSON 结构识别失败: ' + err.message);
+            }
+        }
+
+        // --- Event Listeners ---
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const content = JSON.parse(event.target.result);
+                    processRawContent(content);
+                    statusInfo.innerText = `✅ 已手动加载: ${file.name}`;
+                    statusInfo.style.color = 'var(--success-color, #4ade80)';
+                } catch (err) {
+                    alert('文件读取失败: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        async function handleParse() {
+            if (!rawSchema) return;
+
+            const RefParser = window.getRefParser();
+            if (!RefParser) {
+                alert('关键库 (json-schema-ref-parser) 加载失败。请检查网络连接或尝试在本地 Web 服务器环境下运行。');
+                return;
+            }
+
+            loader.style.display = 'flex';
+            try {
+                // Step 1: 展开 $ref (处理内部 $defs)
+                const dereferencedSchema = await RefParser.dereference(rawSchema);
+                allSchema = dereferencedSchema;
+                
+                // 提取 if-then 规则
+                schemaRules = [];
+                if (dereferencedSchema.allOf) {
+                    dereferencedSchema.allOf.forEach(item => {
+                        if (item.if && item.then) schemaRules.push({ if: item.if, then: item.then });
+                    });
+                }
+                
+                formValues = {}; // 重新初始化
+                lastDynamicRequired = null; 
+                lastShowRequiredOnly = null;
+                updateFormDisplay(true); // 强制重绘
+                
+                // 更改左侧面板标题以反映负载构建器
+                document.querySelector('.pane-title span').textContent = 'JSON Payload Builder';
+            } catch (err) {
+                console.error('Parse Error:', err);
+                alert('解析出错: ' + err.message + '\n\n提示：如果是 CORS 错误，请在本地开启 Web Server (如 Live Server) 运行。');
+            } finally {
+                loader.style.display = 'none';
+            }
+        }
+
+        parseBtn.addEventListener('click', handleParse);
+        showRequiredOnly.addEventListener('change', () => updateFormDisplay(true));
+
+        let lastDynamicRequired = null;
+        let lastShowRequiredOnly = null;
+
+        // 统一更新表单显示
+        function updateFormDisplay(forceRender = false) {
+            const dynamicRequired = evaluateRules(formValues);
+            
+            const currentReqStr = Array.from(dynamicRequired).sort().join(',');
+            const currentShowReq = showRequiredOnly.checked;
+            
+            // 只有当必填项变化、过滤开关变化或强制更新时，才重绘画布
+            if (forceRender || currentReqStr !== lastDynamicRequired || currentShowReq !== lastShowRequiredOnly) {
+                lastDynamicRequired = currentReqStr;
+                lastShowRequiredOnly = currentShowReq;
+                renderForm(allSchema, dynamicRequired);
+            }
+            
+            // 左侧实时展示构建好的 formValues 结构
+            renderJsonTree(formValues);
+        }
+
+        // --- Transformation Logic ---
+        // --- Object Path Helpers ---
+        function getDeep(obj, path) {
+            return path.reduce((acc, key) => (acc && acc[key] !== undefined) ? acc[key] : undefined, obj);
+        }
+
+        function setDeep(obj, path, value) {
+            let current = obj;
+            for (let i = 0; i < path.length - 1; i++) {
+                const key = path[i];
+                if (!current[key]) {
+                    // 如果下一层是数字，则创建数组，否则创建对象
+                    current[key] = typeof path[i+1] === 'number' ? [] : {};
+                }
+                current = current[key];
+            }
+            current[path[path.length - 1]] = value;
+        }
+
+        // --- Rule Evaluator ---
+        function evaluateRules(values) {
+            const dynamicRequiredPaths = new Set();
+            
+            function matchItem(item, cond) {
+                if (!cond) return true;
+                let isMatch = true;
+                let hasCond = false;
+                
+                if (cond.required) {
+                    hasCond = true;
+                    isMatch = isMatch && cond.required.every(k => item[k] !== undefined && item[k] !== '');
+                }
+                if (!isMatch) return false;
+                
+                if (cond.properties) {
+                    hasCond = true;
+                    isMatch = isMatch && Object.entries(cond.properties).every(([k, subCond]) => {
+                        let val = item[k];
+                        if (val === 'true') val = true;
+                        if (val === 'false') val = false;
+                        
+                        if (subCond.enum) return subCond.enum.includes(val);
+                        // 对于深层嵌套可以继续递归，但亚马逊 Schema 通常在这里见底
+                        return true;
+                    });
+                }
+                return hasCond ? isMatch : false;
+            }
+
+            function checkCond(cond) {
+                if (!cond) return false;
+                if (cond.anyOf) return cond.anyOf.some(c => checkCond(c));
+                if (cond.allOf) return cond.allOf.every(c => checkCond(c));
+                if (cond.not) return !checkCond(cond.not);
+                
+                let isMatch = true;
+                let hasCondition = false;
+                
+                // 检查必填
+                if (cond.required) {
+                    hasCondition = true;
+                    isMatch = isMatch && cond.required.every(key => {
+                        const val = values[key];
+                        if (Array.isArray(val)) return val.length > 0;
+                        return val !== undefined && val !== '';
+                    });
+                }
+                
+                if (!isMatch) return false;
+                
+                // 检查属性值
+                if (cond.properties) {
+                    hasCondition = true;
+                    isMatch = isMatch && Object.entries(cond.properties).every(([key, sub]) => {
+                        let val = values[key];
+                        if (!val) val = [];
+                        if (!Array.isArray(val)) val = [val]; // 强制转为数组以便于统一处理
+                        
+                        const target = sub.contains || sub.items || sub;
+                        
+                        // 亚马逊的 contains 表示数组中只要有一个元素满足即可
+                        return val.some(item => {
+                            if (typeof item !== 'object') {
+                                let castVal = item;
+                                if (castVal === 'true') castVal = true;
+                                if (castVal === 'false') castVal = false;
+                                if (target.enum) return target.enum.includes(castVal);
+                                return true;
+                            } else {
+                                return matchItem(item, target);
+                            }
+                        });
+                    });
+                }
+                
+                return hasCondition ? isMatch : false;
+            }
+
+            schemaRules.forEach((rule, idx) => {
+                if (checkCond(rule.if)) {
+                    if (rule.then && rule.then.required) {
+                        rule.then.required.forEach(field => dynamicRequiredPaths.add(field));
+                    }
+                }
+            });
+
+            return dynamicRequiredPaths;
+        }
+
+        // --- Recursive UI Renderer ---
+        function renderForm(schema, dynamicRequired = new Set()) {
+            formPreview.innerHTML = '';
+            if (!schema || !schema.properties) return;
+            
+            const rootRequired = schema.required || [];
+            const onlyReq = showRequiredOnly.checked;
+
+            for (const [key, prop] of Object.entries(schema.properties)) {
+                if (['marketplace_id', 'language_tag'].includes(key)) continue;
+                renderNode(prop, key, [key], formPreview, rootRequired.includes(key), dynamicRequired, onlyReq);
+            }
+
+            if (formPreview.innerHTML === '') {
+                formPreview.innerHTML = '<div class="empty-state"><p>当前没有符合过滤条件的字段</p></div>';
+            }
+        }
+
+        function renderNode(schemaNode, key, path, container, isRequired = false, dynamicRequiredPaths = new Set(), onlyReq = false) {
+            const isRoot = path.length === 1;
+            const rootKey = path[0];
+            const isDynamicallyRequired = dynamicRequiredPaths.has(rootKey);
+            const isCurrentlyRequired = isRequired || isDynamicallyRequired;
+            
+            // "表单只展示最必要的父项目" -> 如果开启了“仅显示必填”，且当前根节点不是必填，则直接跳过渲染
+            if (isRoot && onlyReq && !isCurrentlyRequired) {
+                return;
+            }
+
+            const group = document.createElement('div');
+            group.className = 'form-group ' + (isRoot ? 'root-group' : 'nested-group');
+            if (isCurrentlyRequired) group.classList.add('is-required');
+            
+            const label = document.createElement('label');
+            label.className = 'form-label';
+            label.innerHTML = `${schemaNode.title || key}${isCurrentlyRequired ? '<span class="required-star">*</span>' : ''}`;
+            
+            if (isRoot && isDynamicallyRequired) {
+                const badge = document.createElement('span');
+                badge.className = 'hybrid-badge';
+                badge.style.background = 'var(--accent-color)';
+                badge.textContent = '动态必填';
+                label.appendChild(badge);
+            }
+            group.appendChild(label);
+
+            if (schemaNode.description) {
+                const desc = document.createElement('div');
+                desc.className = 'form-desc';
+                desc.textContent = schemaNode.description;
+                group.appendChild(desc);
+            }
+
+            // 递归渲染核心
+            if (schemaNode.type === 'array' && schemaNode.items) {
+                // 对于数组，这里为了演示简化，直接默认渲染第一项 (index 0)
+                const itemContainer = document.createElement('div');
+                itemContainer.className = 'array-item';
+                renderNode(schemaNode.items, 'Item 1', [...path, 0], itemContainer, isCurrentlyRequired, dynamicRequiredPaths, onlyReq);
+                group.appendChild(itemContainer);
+            } 
+            else if (schemaNode.type === 'object' && schemaNode.properties) {
+                const objContainer = document.createElement('div');
+                objContainer.className = 'object-container';
+                const requiredList = schemaNode.required || [];
+                
+                for (const [subKey, subProp] of Object.entries(schemaNode.properties)) {
+                    if (['marketplace_id', 'language_tag'].includes(subKey)) continue;
+                    renderNode(subProp, subKey, [...path, subKey], objContainer, requiredList.includes(subKey), dynamicRequiredPaths, onlyReq);
+                }
+                group.appendChild(objContainer);
+            }
+            else {
+                // 叶子节点 (input/select)
+                let el;
+                let options = null;
+                
+                if (schemaNode.enum) {
+                    options = schemaNode.enum.map((v, i) => ({
+                        label: (schemaNode.enumNames && schemaNode.enumNames[i]) || v,
+                        value: v
+                    }));
+                } else if (schemaNode.type === 'boolean') {
+                    options = [{label: 'Yes', value: true}, {label: 'No', value: false}];
+                } else if (schemaNode.anyOf || schemaNode.oneOf) {
+                     const comb = (schemaNode.anyOf || []).concat(schemaNode.oneOf || []);
+                     const enumPart = comb.find(c => c.enum);
+                     if (enumPart) {
+                         options = enumPart.enum.map((v, i) => ({
+                             label: (enumPart.enumNames && enumPart.enumNames[i]) || v,
+                             value: v
+                         }));
+                     }
+                }
+
+                const currentVal = getDeep(formValues, path) || '';
+
+                if (options) {
+                    el = document.createElement('select');
+                    el.className = 'form-control';
+                    el.appendChild(new Option('-- 请选择 --', ''));
+                    options.forEach(opt => {
+                        const o = new Option(opt.label, opt.value);
+                        if (currentVal == opt.value) o.selected = true;
+                        el.appendChild(o);
+                    });
+                } else {
+                    el = document.createElement('input');
+                    el.className = 'form-control';
+                    el.value = currentVal;
+                    el.placeholder = `请输入 ${schemaNode.title || key}`;
+                    
+                    // 如果是类型限制，应用一些基础校验
+                    if (schemaNode.type === 'integer' || schemaNode.type === 'number') el.type = 'number';
+                }
+
+                // 绑定事件：更新深层对象值，并触发规则引擎
+                el.addEventListener('change', (e) => {
+                    setDeep(formValues, path, e.target.value);
+                    updateFormDisplay(false);
+                });
+                
+                group.appendChild(el);
+            }
+
+            container.appendChild(group);
+        }
+        // --- JSON Viewer Helpers ---
+        function renderJsonTree(data) {
+            jsonViewer.innerHTML = '';
+            const pre = document.createElement('pre');
+            pre.innerHTML = syntaxHighlight(data);
+            jsonViewer.appendChild(pre);
+        }
+
+        function syntaxHighlight(json) {
+            if (typeof json != 'string') json = JSON.stringify(json, undefined, 2);
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+                let cls = 'number';
+                if (/^"/.test(match)) {
+                    cls = /:$/.test(match) ? 'key' : 'string';
+                } else if (/true|false/.test(match)) {
+                    cls = 'boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'null';
+                }
+                return `<span class="${cls}">${match}</span>`;
+            });
+        }
+
+    </script>
+</body>
+</html>
