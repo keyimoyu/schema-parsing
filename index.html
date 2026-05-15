@@ -246,13 +246,17 @@
         }
 
         .hybrid-badge {
-            font-size: 10px;
-            background: rgba(56, 189, 248, 0.2);
+            font-size: 11px;
+            font-weight: 600;
+            background: rgba(56, 189, 248, 0.15);
             color: var(--accent-color);
-            padding: 2px 6px;
+            padding: 2px 8px;
+            border: 1px solid rgba(56, 189, 248, 0.4);
             border-radius: 4px;
             margin-left: 8px;
             vertical-align: middle;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
         }
 
         .empty-state {
@@ -310,6 +314,60 @@
         }
         ::-webkit-scrollbar-thumb:hover {
             background: var(--text-muted);
+        }
+        /* Array Controls */
+        .array-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 0.5rem;
+            margin-bottom: 0.8rem;
+            border-bottom: 1px dashed var(--border-color);
+        }
+
+        .item-title {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--accent-color);
+            text-transform: uppercase;
+        }
+
+        .btn-mini {
+            padding: 2px 8px;
+            font-size: 0.7rem;
+            border-radius: 4px;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .btn-add {
+            background-color: var(--success-color);
+            color: white;
+            margin-top: 0.5rem;
+        }
+
+        .btn-add:hover {
+            background-color: #059669;
+        }
+
+        .btn-delete {
+            background-color: var(--error-color);
+            color: white;
+        }
+
+        .btn-delete:hover {
+            background-color: #dc2626;
         }
     </style>
 </head>
@@ -545,7 +603,7 @@
             let current = obj;
             for (let i = 0; i < path.length - 1; i++) {
                 const key = path[i];
-                if (!current[key]) {
+                if (current[key] === undefined) {
                     // 如果下一层是数字，则创建数组，否则创建对象
                     current[key] = typeof path[i+1] === 'number' ? [] : {};
                 }
@@ -554,46 +612,97 @@
             current[path[path.length - 1]] = value;
         }
 
+        function addItem(path, schemaNode) {
+            let arr = getDeep(formValues, path);
+            if (!arr) {
+                setDeep(formValues, path, []);
+                arr = getDeep(formValues, path);
+            }
+            
+            // 创建一个符合 items 结构的默认值
+            let newItem = {};
+            if (schemaNode.items && schemaNode.items.type === 'object' && schemaNode.items.properties) {
+                // 如果是对象，可以预填一些必填项或默认值
+                // 这里暂时保持简单，由 renderNode 的 input 触发 setDeep 来填充
+            } else if (schemaNode.items && schemaNode.items.type === 'string') {
+                newItem = "";
+            }
+            
+            arr.push(newItem);
+            updateFormDisplay(true); // 强制重绘
+        }
+
+        function removeItem(path, index) {
+            const arr = getDeep(formValues, path);
+            if (arr && Array.isArray(arr)) {
+                arr.splice(index, 1);
+                updateFormDisplay(true); // 强制重绘
+            }
+        }
+
         // --- Rule Evaluator ---
         function evaluateRules(values) {
             const dynamicRequiredPaths = new Set();
-            
+            if (!schemaRules) return dynamicRequiredPaths;
+
             function matchItem(item, cond) {
-                if (!cond) return true;
+                if (!cond || Object.keys(cond).length === 0) return true;
                 let isMatch = true;
-                let hasCond = false;
                 
                 if (cond.required) {
-                    hasCond = true;
-                    isMatch = isMatch && cond.required.every(k => item[k] !== undefined && item[k] !== '');
+                    isMatch = isMatch && cond.required.every(k => item && item[k] !== undefined && item[k] !== '');
                 }
-                if (!isMatch) return false;
                 
                 if (cond.properties) {
-                    hasCond = true;
                     isMatch = isMatch && Object.entries(cond.properties).every(([k, subCond]) => {
-                        let val = item[k];
+                        let val = item ? item[k] : undefined;
+                        // 类型转换支持
                         if (val === 'true') val = true;
                         if (val === 'false') val = false;
                         
+                        if (subCond.hasOwnProperty('const')) return val === subCond.const;
                         if (subCond.enum) return subCond.enum.includes(val);
-                        // 对于深层嵌套可以继续递归，但亚马逊 Schema 通常在这里见底
+                        
+                        // 处理嵌套的 contains / items
+                        if (subCond.contains || subCond.items) {
+                            const arr = Array.isArray(val) ? val : (val !== undefined ? [val] : []);
+                            const target = subCond.contains || subCond.items;
+                            return arr.some(subItem => matchItem(subItem, target));
+                        }
+
+                        if (subCond.properties || subCond.required) return matchItem(val || {}, subCond);
                         return true;
                     });
                 }
-                return hasCond ? isMatch : false;
+                
+                if (cond.const !== undefined) {
+                    let val = item;
+                    if (val === 'true') val = true;
+                    if (val === 'false') val = false;
+                    isMatch = isMatch && (val === cond.const);
+                }
+
+                if (cond.enum) {
+                    let val = item;
+                    if (val === 'true') val = true;
+                    if (val === 'false') val = false;
+                    isMatch = isMatch && cond.enum.includes(val);
+                }
+
+                return isMatch;
             }
 
             function checkCond(cond) {
                 if (!cond) return false;
+                
+                // 增加逻辑运算符支持
                 if (cond.anyOf) return cond.anyOf.some(c => checkCond(c));
                 if (cond.allOf) return cond.allOf.every(c => checkCond(c));
                 if (cond.not) return !checkCond(cond.not);
-                
+
                 let isMatch = true;
                 let hasCondition = false;
-                
-                // 检查必填
+
                 if (cond.required) {
                     hasCondition = true;
                     isMatch = isMatch && cond.required.every(key => {
@@ -602,31 +711,16 @@
                         return val !== undefined && val !== '';
                     });
                 }
-                
-                if (!isMatch) return false;
-                
-                // 检查属性值
+
                 if (cond.properties) {
                     hasCondition = true;
                     isMatch = isMatch && Object.entries(cond.properties).every(([key, sub]) => {
                         let val = values[key];
-                        if (!val) val = [];
-                        if (!Array.isArray(val)) val = [val]; // 强制转为数组以便于统一处理
+                        if (val === undefined || val === null) val = [];
+                        if (!Array.isArray(val)) val = [val]; 
                         
                         const target = sub.contains || sub.items || sub;
-                        
-                        // 亚马逊的 contains 表示数组中只要有一个元素满足即可
-                        return val.some(item => {
-                            if (typeof item !== 'object') {
-                                let castVal = item;
-                                if (castVal === 'true') castVal = true;
-                                if (castVal === 'false') castVal = false;
-                                if (target.enum) return target.enum.includes(castVal);
-                                return true;
-                            } else {
-                                return matchItem(item, target);
-                            }
-                        });
+                        return val.some(item => matchItem(item, target));
                     });
                 }
                 
@@ -684,7 +778,6 @@
             if (isRoot && isDynamicallyRequired) {
                 const badge = document.createElement('span');
                 badge.className = 'hybrid-badge';
-                badge.style.background = 'var(--accent-color)';
                 badge.textContent = '动态必填';
                 label.appendChild(badge);
             }
@@ -699,11 +792,70 @@
 
             // 递归渲染核心
             if (schemaNode.type === 'array' && schemaNode.items) {
-                // 对于数组，这里为了演示简化，直接默认渲染第一项 (index 0)
-                const itemContainer = document.createElement('div');
-                itemContainer.className = 'array-item';
-                renderNode(schemaNode.items, 'Item 1', [...path, 0], itemContainer, isCurrentlyRequired, dynamicRequiredPaths, onlyReq);
-                group.appendChild(itemContainer);
+                const minItems = Math.max(schemaNode.minItems || 0, schemaNode.minUniqueItems || 0);
+                const maxItems = Math.min(schemaNode.maxItems || 100, schemaNode.maxUniqueItems || 100);
+                
+                let currentItems = getDeep(formValues, path);
+                
+                // 初始化：如果为空且必填或有最小数量要求，先填充
+                if (!currentItems || !Array.isArray(currentItems)) {
+                    const initCount = isCurrentlyRequired ? Math.max(minItems, 1) : minItems;
+                    if (initCount > 0) {
+                        currentItems = Array(initCount).fill(0).map(() => ({}));
+                        setDeep(formValues, path, currentItems);
+                    } else {
+                        currentItems = [];
+                    }
+                }
+
+                const arrayContainer = document.createElement('div');
+                arrayContainer.className = 'array-container';
+
+                currentItems.forEach((item, index) => {
+                    const itemWrapper = document.createElement('div');
+                    itemWrapper.className = 'array-item';
+                    
+                    // 条目头部：标题和删除按钮
+                    const itemHeader = document.createElement('div');
+                    itemHeader.className = 'item-header';
+                    
+                    const itemTitle = document.createElement('span');
+                    itemTitle.className = 'item-title';
+                    itemTitle.textContent = `${schemaNode.title || key} #${index + 1}`;
+                    itemHeader.appendChild(itemTitle);
+                    
+                    // 如果超过最小数量，允许删除
+                    if (currentItems.length > minItems) {
+                        const delBtn = document.createElement('button');
+                        delBtn.className = 'btn-mini btn-delete';
+                        delBtn.innerHTML = `<span>×</span> 删除`;
+                        delBtn.onclick = (e) => {
+                            e.preventDefault();
+                            removeItem(path, index);
+                        };
+                        itemHeader.appendChild(delBtn);
+                    }
+                    
+                    itemWrapper.appendChild(itemHeader);
+                    
+                    // 渲染子节点内容
+                    renderNode(schemaNode.items, `Item ${index + 1}`, [...path, index], itemWrapper, false, dynamicRequiredPaths, onlyReq);
+                    arrayContainer.appendChild(itemWrapper);
+                });
+
+                group.appendChild(arrayContainer);
+
+                // 如果没达到最大数量，允许添加
+                if (currentItems.length < maxItems) {
+                    const addBtn = document.createElement('button');
+                    addBtn.className = 'btn-mini btn-add';
+                    addBtn.innerHTML = `<span>+</span> 添加条目`;
+                    addBtn.onclick = (e) => {
+                        e.preventDefault();
+                        addItem(path, schemaNode);
+                    };
+                    group.appendChild(addBtn);
+                }
             } 
             else if (schemaNode.type === 'object' && schemaNode.properties) {
                 const objContainer = document.createElement('div');
