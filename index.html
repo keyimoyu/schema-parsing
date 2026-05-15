@@ -582,18 +582,112 @@
             const currentReqStr = Array.from(dynamicRequired).sort().join(',');
             const currentShowReq = showRequiredOnly.checked;
             
-            // 只有当必填项变化、过滤开关变化或强制更新时，才重绘画布
             if (forceRender || currentReqStr !== lastDynamicRequired || currentShowReq !== lastShowRequiredOnly) {
                 lastDynamicRequired = currentReqStr;
                 lastShowRequiredOnly = currentShowReq;
                 renderForm(allSchema, dynamicRequired);
             }
             
-            // 左侧实时展示构建好的 formValues 结构
-            renderJsonTree(formValues);
+            // 转换并展示最终的 Amazon Payload
+            const finalPayload = transformToAmazonPayload(formValues);
+            renderJsonTree(finalPayload);
         }
 
         // --- Transformation Logic ---
+        function transformToAmazonPayload(formData) {
+            const mktId = "ATVPDKIKX0DER"; // 默认北美站
+            
+            // 辅助函数：深度清理并补充 marketplace_id
+            function normalizeAttributes(obj) {
+                if (!obj || typeof obj !== 'object') return obj;
+                
+                const result = Array.isArray(obj) ? [] : {};
+                
+                for (const [key, value] of Object.entries(obj)) {
+                    if (value === undefined || value === null || value === '') continue;
+                    
+                    if (Array.isArray(value)) {
+                        result[key] = value.map(item => {
+                            let normalizedItem = normalizeAttributes(item);
+                            // 如果是包含 value 的对象且没有 marketplace_id，补充它
+                            if (normalizedItem && typeof normalizedItem === 'object' && normalizedItem.hasOwnProperty('value')) {
+                                if (!normalizedItem.marketplace_id) normalizedItem.marketplace_id = mktId;
+                            }
+                            return normalizedItem;
+                        }).filter(item => item !== null && item !== undefined);
+                        
+                        if (result[key].length === 0) delete result[key];
+                    } else if (typeof value === 'object') {
+                        result[key] = normalizeAttributes(value);
+                        if (Object.keys(result[key]).length === 0) delete result[key];
+                    } else {
+                        // 基础类型，根据 Amazon 要求，通常需要包装成 [{value, marketplace_id}]
+                        // 但如果 schema 解析得好，renderNode 已经处理了这种包装
+                        // 这里做个兜底
+                        result[key] = value;
+                    }
+                }
+                return result;
+            }
+
+            const attributes = normalizeAttributes(formData);
+            
+            // 判断是否为多变体模式 (检查是否有 variations 数组，这里假设 variations 是从外部或特定逻辑注入的)
+            // 现实场景中，用户可能通过专门的变体向导生成 variations 数组
+            const variations = formData._variations || []; 
+            
+            if (variations.length === 0) {
+                // --- 单品模式 ---
+                const sku = attributes.item_sku?.[0]?.value || attributes.sku?.[0]?.value || "SKU-" + Date.now();
+                return [{
+                    sku: sku,
+                    productType: schemaMetadata.id,
+                    attributes: attributes
+                }];
+            } else {
+                // --- 多变体模式 ---
+                const payload = [];
+                const parentSku = attributes.item_sku?.[0]?.value || "PARENT-SKU";
+                const variationTheme = attributes.variation_theme?.[0]?.value || "SIZE_COLOR";
+
+                // 1. 构建父体
+                const parentAttributes = JSON.parse(JSON.stringify(attributes));
+                parentAttributes.parentage_level = [{ value: "parent", marketplace_id: mktId }];
+                parentAttributes.variation_theme = [{ value: variationTheme, marketplace_id: mktId }];
+                // 父体不需要价格、库存等 (这里简单处理，实际可根据 schema 进一步过滤)
+                delete parentAttributes.purchasable_offer; 
+                
+                payload.push({
+                    sku: parentSku,
+                    productType: schemaMetadata.id,
+                    attributes: parentAttributes
+                });
+
+                // 2. 构建子体
+                variations.forEach(v => {
+                    const childAttributes = JSON.parse(JSON.stringify(attributes));
+                    childAttributes.parentage_level = [{ value: "child", marketplace_id: mktId }];
+                    childAttributes.child_parent_sku_relationship = [{
+                        parent_sku: parentSku,
+                        child_relationship_type: "variation",
+                        marketplace_id: mktId
+                    }];
+                    
+                    // 覆盖子体特有属性 (color, size, price, sku 等)
+                    if (v.color) childAttributes.color = [{ value: v.color, marketplace_id: mktId }];
+                    if (v.size) childAttributes.size = [{ value: v.size, marketplace_id: mktId }];
+                    
+                    payload.push({
+                        sku: v.sku || (parentSku + "-" + (v.color || '') + (v.size || '')),
+                        productType: schemaMetadata.id,
+                        attributes: childAttributes
+                    });
+                });
+
+                return payload;
+            }
+        }
+
         // --- Object Path Helpers ---
         function getDeep(obj, path) {
             return path.reduce((acc, key) => (acc && acc[key] !== undefined) ? acc[key] : undefined, obj);
@@ -899,7 +993,8 @@
                     el.appendChild(new Option('-- 请选择 --', ''));
                     options.forEach(opt => {
                         const o = new Option(opt.label, opt.value);
-                        if (currentVal == opt.value) o.selected = true;
+                        // 关键修复：使用字符串对比，防止 boolean true 和 string "true" 匹配失败
+                        if (String(currentVal) === String(opt.value)) o.selected = true;
                         el.appendChild(o);
                     });
                 } else {
