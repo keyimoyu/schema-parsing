@@ -634,13 +634,13 @@
                     let hasRealValue = false;
                     
                     // 首先处理在 $defs 中全局预填的特殊字段（保证它们在开头）
-                    const globalKeys = ['marketplace_id', 'language_tag'];
+                    const globalKeys = allSchema && allSchema.$defs ? Object.keys(allSchema.$defs) : [];
                     for (const key of globalKeys) {
                         if (obj[key] !== undefined && !key.startsWith('_')) {
                             const cleanedVal = deepClean(obj[key]);
                             if (cleanedVal !== undefined && cleanedVal !== null && cleanedVal !== "") {
                                 result[key] = cleanedVal;
-                                hasRealValue = true;
+                                if (key !== 'marketplace_id') hasRealValue = true;
                             }
                         }
                     }
@@ -752,8 +752,14 @@
             // 创建一个符合 items 结构的默认值
             let newItem = {};
             if (schemaNode.items && schemaNode.items.type === 'object' && schemaNode.items.properties) {
-                // 如果是对象，可以预填一些必填项或默认值
-                // 这里暂时保持简单，由 renderNode 的 input 触发 setDeep 来填充
+                // 根据 selectors 自动注入父级的环境参数（如 marketplace_id, language_tag）
+                if (schemaNode.selectors && Array.isArray(schemaNode.selectors)) {
+                    schemaNode.selectors.forEach(sel => {
+                        if (formValues[sel] !== undefined) {
+                            newItem[sel] = formValues[sel];
+                        }
+                    });
+                }
             } else if (schemaNode.items && schemaNode.items.type === 'string') {
                 newItem = "";
             }
@@ -876,14 +882,14 @@
             const rootRequired = schema.required || [];
             const onlyReq = showRequiredOnly.checked;
 
-            // 1. 优先渲染全局定义（$defs 中的设置项，如 marketplace_id, language_tag）
+            // 1. 优先渲染全局定义（$defs 中的设置项）
+            const globalKeys = schema.$defs ? Object.keys(schema.$defs) : [];
             if (schema.$defs) {
-                const globalKeys = ['marketplace_id', 'language_tag'];
                 for (const defKey of globalKeys) {
                     if (schema.$defs[defKey]) {
                         // 构建一个模拟的 Node 结构供 renderNode 使用
                         const defNode = Object.assign({}, schema.$defs[defKey], {
-                            title: defKey === 'marketplace_id' ? 'Marketplace ID' : (defKey === 'language_tag' ? 'Language Tag' : defKey)
+                            title: schema.$defs[defKey].title || defKey
                         });
                         // 注意这里路径传 [defKey]
                         renderNode(defNode, defKey, [defKey], formPreview, true, dynamicRequired, false);
@@ -894,7 +900,7 @@
             // 2. 渲染其他主体属性
             for (const [key, prop] of Object.entries(schema.properties)) {
                 // 跳过已经在上面渲染过的全局键
-                if (['marketplace_id', 'language_tag'].includes(key)) continue;
+                if (globalKeys.includes(key)) continue;
                 renderNode(prop, key, [key], formPreview, rootRequired.includes(key), dynamicRequired, onlyReq);
             }
 
@@ -948,7 +954,19 @@
                 if (!currentItems || !Array.isArray(currentItems)) {
                     const initCount = isCurrentlyRequired ? Math.max(minItems, 1) : minItems;
                     if (initCount > 0) {
-                        currentItems = Array(initCount).fill(0).map(() => ({}));
+                        currentItems = Array(initCount).fill(0).map(() => {
+                            let defaultItem = {};
+                            if (schemaNode.items && schemaNode.items.type === 'object') {
+                                if (schemaNode.selectors && Array.isArray(schemaNode.selectors)) {
+                                    schemaNode.selectors.forEach(sel => {
+                                        if (formValues[sel] !== undefined) {
+                                            defaultItem[sel] = formValues[sel];
+                                        }
+                                    });
+                                }
+                            }
+                            return defaultItem;
+                        });
                         setDeep(formValues, path, currentItems);
                     } else {
                         currentItems = [];
@@ -1010,7 +1028,7 @@
                 const requiredList = schemaNode.required || [];
                 
                 for (const [subKey, subProp] of Object.entries(schemaNode.properties)) {
-                    if (['marketplace_id', 'language_tag'].includes(subKey)) continue;
+                    // 放开对 marketplace_id 和 language_tag 的屏蔽，允许在子对象中根据需要被渲染并由用户独立设定
                     renderNode(subProp, subKey, [...path, subKey], objContainer, requiredList.includes(subKey), dynamicRequiredPaths, onlyReq);
                 }
                 group.appendChild(objContainer);
@@ -1088,7 +1106,57 @@
 
                 // 绑定事件：更新深层对象值，并触发规则引擎
                 el.addEventListener('change', (e) => {
-                    setDeep(formValues, path, e.target.value);
+                    let finalValue = e.target.value;
+                    
+                    // 通用数据类型适配逻辑
+                    if (finalValue !== '') {
+                        // 1. 收集当前节点所有允许的类型 (合并 type 和 anyOf/oneOf)
+                        let allowedTypes = new Set();
+                        if (schemaNode.type) {
+                            if (Array.isArray(schemaNode.type)) schemaNode.type.forEach(t => allowedTypes.add(t));
+                            else allowedTypes.add(schemaNode.type);
+                        }
+                        if (schemaNode.anyOf || schemaNode.oneOf) {
+                            const comb = (schemaNode.anyOf || []).concat(schemaNode.oneOf || []);
+                            comb.forEach(c => {
+                                if (c.type) {
+                                    if (Array.isArray(c.type)) c.type.forEach(t => allowedTypes.add(t));
+                                    else allowedTypes.add(c.type);
+                                }
+                            });
+                        }
+
+                        // 2. 按优先级尝试将字符串转为正确的 JS 类型
+                        let converted = false;
+                        
+                        // 尝试布尔类型
+                        if (!converted && allowedTypes.has('boolean')) {
+                            if (finalValue === 'true') { finalValue = true; converted = true; }
+                            else if (finalValue === 'false') { finalValue = false; converted = true; }
+                        }
+                        
+                        // 尝试数字类型 (number / integer)
+                        if (!converted && (allowedTypes.has('number') || allowedTypes.has('integer'))) {
+                            const numVal = Number(finalValue);
+                            // 确保不是全空格或空字符串，并且是有效的数字
+                            if (!isNaN(numVal) && String(finalValue).trim() !== '') {
+                                // 如果只允许 integer 且不是整数，则不转换
+                                if (allowedTypes.has('integer') && !allowedTypes.has('number')) {
+                                    if (Number.isInteger(numVal)) { finalValue = numVal; converted = true; }
+                                } else {
+                                    finalValue = numVal; converted = true;
+                                }
+                            }
+                        }
+                        
+                        // 如果经过上面尝试仍未转换成功（即依然是字符串），但 Schema 根本不允许 string，
+                        // 则说明这是一个非法的无效输入（比如在数字框里敲了字母），直接置空以便 deepClean 剔除
+                        if (!converted && allowedTypes.size > 0 && !allowedTypes.has('string')) {
+                            finalValue = '';
+                        }
+                    }
+
+                    setDeep(formValues, path, finalValue);
                     updateFormDisplay(false);
                 });
                 
