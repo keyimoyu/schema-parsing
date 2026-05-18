@@ -555,6 +555,21 @@
                 }
                 
                 formValues = {}; // 重新初始化
+
+                // 解析 $defs 中的默认值并提前注入到 formValues
+                if (dereferencedSchema.$defs) {
+                    for (const [defKey, defProp] of Object.entries(dereferencedSchema.$defs)) {
+                        if (defProp.default !== undefined) {
+                            formValues[defKey] = defProp.default;
+                        } else if (defProp.anyOf) {
+                             const enumPart = defProp.anyOf.find(c => c.enum && c.enum.length > 0);
+                             if (enumPart) {
+                                 formValues[defKey] = enumPart.enum[0];
+                             }
+                        }
+                    }
+                }
+                
                 lastDynamicRequired = null; 
                 lastShowRequiredOnly = null;
                 updateFormDisplay(true); // 强制重绘
@@ -618,9 +633,21 @@
                     const result = {};
                     let hasRealValue = false;
                     
+                    // 首先处理在 $defs 中全局预填的特殊字段（保证它们在开头）
+                    const globalKeys = ['marketplace_id', 'language_tag'];
+                    for (const key of globalKeys) {
+                        if (obj[key] !== undefined && !key.startsWith('_')) {
+                            const cleanedVal = deepClean(obj[key]);
+                            if (cleanedVal !== undefined && cleanedVal !== null && cleanedVal !== "") {
+                                result[key] = cleanedVal;
+                                hasRealValue = true;
+                            }
+                        }
+                    }
+
                     for (const [key, value] of Object.entries(obj)) {
-                        // 跳过 UI 内部私有字段
-                        if (key.startsWith('_')) continue;
+                        // 跳过 UI 内部私有字段，以及前面已经处理过的全局键
+                        if (key.startsWith('_') || globalKeys.includes(key)) continue;
 
                         const cleanedVal = deepClean(value);
                         if (cleanedVal !== undefined && cleanedVal !== null && cleanedVal !== "") {
@@ -849,7 +876,24 @@
             const rootRequired = schema.required || [];
             const onlyReq = showRequiredOnly.checked;
 
+            // 1. 优先渲染全局定义（$defs 中的设置项，如 marketplace_id, language_tag）
+            if (schema.$defs) {
+                const globalKeys = ['marketplace_id', 'language_tag'];
+                for (const defKey of globalKeys) {
+                    if (schema.$defs[defKey]) {
+                        // 构建一个模拟的 Node 结构供 renderNode 使用
+                        const defNode = Object.assign({}, schema.$defs[defKey], {
+                            title: defKey === 'marketplace_id' ? 'Marketplace ID' : (defKey === 'language_tag' ? 'Language Tag' : defKey)
+                        });
+                        // 注意这里路径传 [defKey]
+                        renderNode(defNode, defKey, [defKey], formPreview, true, dynamicRequired, false);
+                    }
+                }
+            }
+
+            // 2. 渲染其他主体属性
             for (const [key, prop] of Object.entries(schema.properties)) {
+                // 跳过已经在上面渲染过的全局键
                 if (['marketplace_id', 'language_tag'].includes(key)) continue;
                 renderNode(prop, key, [key], formPreview, rootRequired.includes(key), dynamicRequired, onlyReq);
             }
