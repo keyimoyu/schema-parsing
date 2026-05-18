@@ -674,20 +674,27 @@
                 return obj === "" ? undefined : obj;
             }
 
+            // 先提取我们在 UI 顶层额外挂载的 MSKU 字段（它属于外层信息，不应混入 attributes 里）
+            const customSku = typeof formData.sku === 'string' && formData.sku.trim() !== '' ? formData.sku.trim() : undefined;
+            
             const attributes = deepClean(formData) || {};
+            // 清理掉 attributes 里可能残留的外层 sku 字段
+            delete attributes.sku;
             
             const variations = formData._variations || []; 
             
             if (variations.length === 0) {
-                const sku = attributes.item_sku?.[0]?.value || attributes.sku?.[0]?.value || "SKU-" + Date.now();
+                // 优先使用用户在 "二、报价与库存" 中手填的 MSKU，其次尝试查找 item_sku，最后 fallback 随机生成
+                const finalSku = customSku || attributes.item_sku?.[0]?.value || "SKU-" + Date.now();
                 return [{
-                    sku: sku,
+                    sku: finalSku,
                     productType: schemaMetadata.id,
                     attributes: attributes
                 }];
             } else {
                 const payload = [];
-                const parentSku = attributes.item_sku?.[0]?.value || "PARENT-SKU";
+                // 作为父体变种时，同理优先使用手填 MSKU
+                const parentSku = customSku || attributes.item_sku?.[0]?.value || "PARENT-SKU";
                 const variationTheme = attributes.variation_theme?.[0]?.value || "SIZE_COLOR";
 
                 const parentAttributes = JSON.parse(JSON.stringify(attributes));
@@ -874,6 +881,66 @@
             return dynamicRequiredPaths;
         }
 
+        const FIXED_GROUPS = {
+            'basic': {
+                title: '一、基础信息 (Basic Information)',
+                keys: [
+                    'item_name', 
+                    'brand', 
+                    'item_type_keyword', // Amazon分类节点
+                    'generic_keyword', 
+                    'item_package_dimensions', 
+                    'item_package_weight', 
+                    'parentage_level', // 销售类型 (单体/变体)
+                    'child_parent_sku_relationship', // 变体关系
+                    'variation_theme', // 变体主题
+                    'fulfillment_availability' // 配送渠道
+                ]
+            },
+            'offer': {
+                title: '二、报价与库存 (Offer & Inventory)',
+                keys: [
+                    'externally_assigned_product_identifier', // 商品编码 (UPC/EAN)
+                    'condition_type', 
+                    'condition_note',
+                    'purchasable_offer', // 包含价格、优惠价、时间
+                    'list_price',
+                    'merchant_release_date',
+                    'product_site_launch_date', // 上架日期/发售日期
+                    'merchant_shipping_group' // 配送模板
+                ]
+            },
+            'images': {
+                title: '三、图片模块 (Images)',
+                keys: [
+                    'main_product_image_locator', 
+                    'swatch_product_image_locator',
+                    'other_product_image_locator_1', 
+                    'other_product_image_locator_2', 
+                    'other_product_image_locator_3', 
+                    'other_product_image_locator_4', 
+                    'other_product_image_locator_5', 
+                    'other_product_image_locator_6', 
+                    'other_product_image_locator_7', 
+                    'other_product_image_locator_8',
+                    'main_offer_image_locator', // Offer特定的主图
+                    'other_offer_image_locator_1',
+                    'other_offer_image_locator_2',
+                    'other_offer_image_locator_3',
+                    'other_offer_image_locator_4',
+                    'other_offer_image_locator_5'
+                ]
+            },
+            'description': {
+                title: '四、描述模块 (Description)',
+                keys: ['bullet_point', 'product_description']
+            },
+            'dynamic': {
+                title: '五、更多动态属性 (More Attributes)',
+                keys: []
+            }
+        };
+
         // --- Recursive UI Renderer ---
         function renderForm(schema, dynamicRequired = new Set()) {
             formPreview.innerHTML = '';
@@ -882,26 +949,98 @@
             const rootRequired = schema.required || [];
             const onlyReq = showRequiredOnly.checked;
 
-            // 1. 优先渲染全局定义（$defs 中的设置项）
+            // 1. 优先渲染全局定义（$defs 中的设置项） - 将其放在最顶部
             const globalKeys = schema.$defs ? Object.keys(schema.$defs) : [];
+            const defsContainer = document.createElement('div');
+            defsContainer.className = 'global-defs-container';
+            formPreview.appendChild(defsContainer);
+
             if (schema.$defs) {
                 for (const defKey of globalKeys) {
                     if (schema.$defs[defKey]) {
-                        // 构建一个模拟的 Node 结构供 renderNode 使用
                         const defNode = Object.assign({}, schema.$defs[defKey], {
                             title: schema.$defs[defKey].title || defKey
                         });
-                        // 注意这里路径传 [defKey]
-                        renderNode(defNode, defKey, [defKey], formPreview, true, dynamicRequired, false);
+                        renderNode(defNode, defKey, [defKey], defsContainer, true, dynamicRequired, false);
                     }
                 }
             }
 
-            // 2. 渲染其他主体属性
+            // 2. 创建并挂载 5 个分组容器
+            const containers = {};
+            for (const [groupId, groupInfo] of Object.entries(FIXED_GROUPS)) {
+                const fieldset = document.createElement('fieldset');
+                fieldset.className = 'form-section';
+                fieldset.style.marginBottom = '2rem';
+                fieldset.style.border = '1px solid var(--border-color)';
+                fieldset.style.borderRadius = '8px';
+                fieldset.style.padding = '1.5rem';
+                fieldset.style.backgroundColor = 'rgba(255, 255, 255, 0.01)';
+                
+                const legend = document.createElement('legend');
+                legend.style.padding = '0 10px';
+                legend.style.fontWeight = '600';
+                legend.style.fontSize = '1.05rem';
+                legend.style.color = 'var(--accent-color)';
+                legend.textContent = groupInfo.title;
+                fieldset.appendChild(legend);
+                
+                const contentDiv = document.createElement('div');
+                contentDiv.id = `group-content-${groupId}`;
+                fieldset.appendChild(contentDiv);
+                
+                formPreview.appendChild(fieldset);
+                containers[groupId] = contentDiv;
+            }
+
+            // 手动在 Offer 容器中添加原生的 MSKU 输入框
+            const mskuDiv = document.createElement('div');
+            mskuDiv.className = 'form-group root-group is-required';
+            mskuDiv.innerHTML = `
+                <label class="form-label">Seller SKU (MSKU) <span class="required-star">*</span></label>
+                <div class="form-desc">Merchant suggested SKU (Required for all listings)</div>
+                <input type="text" class="form-control" placeholder="Enter SKU..." id="custom-msku-input">
+            `;
+            containers['offer'].appendChild(mskuDiv);
+            
+            // 绑定 MSKU 事件 (通过 setTimeout 确保 DOM 已经完全渲染)
+            setTimeout(() => {
+                const input = document.getElementById('custom-msku-input');
+                if (input) {
+                    input.value = formValues['sku'] || '';
+                    input.addEventListener('input', (e) => {
+                        formValues['sku'] = e.target.value;
+                        // 注意：这里更新 formValues 后由于我们不是动态节点，所以可以不用全量重绘
+                        // 但如果想保持一致，可以调用 updateFormDisplay(false)，不过可能会打断输入焦点
+                    });
+                }
+            }, 100);
+
+            // 3. 按照映射表渲染各个固定属性
+            const renderedKeys = new Set();
+            for (const [groupId, groupInfo] of Object.entries(FIXED_GROUPS)) {
+                if (groupId === 'dynamic') continue;
+                
+                for (const key of groupInfo.keys) {
+                    if (schema.properties[key]) {
+                        renderNode(schema.properties[key], key, [key], containers[groupId], rootRequired.includes(key), dynamicRequired, onlyReq);
+                        renderedKeys.add(key);
+                    }
+                }
+            }
+
+            // 4. 渲染剩余的所有动态属性
             for (const [key, prop] of Object.entries(schema.properties)) {
-                // 跳过已经在上面渲染过的全局键
-                if (globalKeys.includes(key)) continue;
-                renderNode(prop, key, [key], formPreview, rootRequired.includes(key), dynamicRequired, onlyReq);
+                // 跳过已经在上面渲染过的全局键和固定键
+                if (globalKeys.includes(key) || renderedKeys.has(key)) continue;
+                renderNode(prop, key, [key], containers['dynamic'], rootRequired.includes(key), dynamicRequired, onlyReq);
+            }
+
+            // 5. 隐藏空的容器（如果没有内容）
+            for (const [groupId, container] of Object.entries(containers)) {
+                if (container.children.length === 0) {
+                    container.parentElement.style.display = 'none';
+                }
             }
 
             if (formPreview.innerHTML === '') {
