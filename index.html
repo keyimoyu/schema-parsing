@@ -975,6 +975,7 @@
                 // 叶子节点 (input/select)
                 let el;
                 let options = null;
+                let isFreeInputAllowed = false;
                 
                 if (schemaNode.enum) {
                     options = schemaNode.enum.map((v, i) => ({
@@ -986,17 +987,23 @@
                 } else if (schemaNode.anyOf || schemaNode.oneOf) {
                      const comb = (schemaNode.anyOf || []).concat(schemaNode.oneOf || []);
                      const enumPart = comb.find(c => c.enum);
+                     const stringPart = comb.find(c => c.type === 'string' && !c.enum);
+                     
                      if (enumPart) {
                          options = enumPart.enum.map((v, i) => ({
                              label: (enumPart.enumNames && enumPart.enumNames[i]) || v,
                              value: v
                          }));
+                         // 如果同时存在允许任意字符串的条件，说明可以自由输入
+                         if (stringPart) {
+                             isFreeInputAllowed = true;
+                         }
                      }
                 }
 
                 const currentVal = getDeep(formValues, path) || '';
 
-                if (options) {
+                if (options && !isFreeInputAllowed) {
                     el = document.createElement('select');
                     el.className = 'form-control';
                     el.appendChild(new Option('-- 请选择 --', ''));
@@ -1014,6 +1021,25 @@
                     
                     // 如果是类型限制，应用一些基础校验
                     if (schemaNode.type === 'integer' || schemaNode.type === 'number') el.type = 'number';
+                    
+                    // 如果既有推荐值（options）又允许自由输入（isFreeInputAllowed），则使用 datalist
+                    if (options && isFreeInputAllowed) {
+                        const listId = `datalist-${path.join('-')}`;
+                        el.setAttribute('list', listId);
+                        
+                        const datalist = document.createElement('datalist');
+                        datalist.id = listId;
+                        options.forEach(opt => {
+                            const option = document.createElement('option');
+                            option.value = opt.value;
+                            // datalist option 不支持直接显示 label，如果 label 和 value 不同，可以考虑拼接或只用 value
+                            if(opt.label !== opt.value) {
+                                option.textContent = opt.label;
+                            }
+                            datalist.appendChild(option);
+                        });
+                        group.appendChild(datalist);
+                    }
                 }
 
                 // 绑定事件：更新深层对象值，并触发规则引擎
