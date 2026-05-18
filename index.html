@@ -640,7 +640,7 @@
                             const cleanedVal = deepClean(obj[key]);
                             if (cleanedVal !== undefined && cleanedVal !== null && cleanedVal !== "") {
                                 result[key] = cleanedVal;
-                                if (key !== 'marketplace_id') hasRealValue = true;
+                                // 注意：收集到 globalKeys（如 marketplace_id, language_tag）不算作包含实质内容
                             }
                         }
                     }
@@ -652,8 +652,8 @@
                         const cleanedVal = deepClean(value);
                         if (cleanedVal !== undefined && cleanedVal !== null && cleanedVal !== "") {
                             result[key] = cleanedVal;
-                            // 标记是否含有除 marketplace_id 以外的实质性内容
-                            if (key !== 'marketplace_id') hasRealValue = true;
+                            // 遇到非 global 的业务字段，才标记为有实质内容
+                            hasRealValue = true;
                         }
                     }
 
@@ -662,8 +662,8 @@
                         result.marketplace_id = mktId;
                     }
 
-                    // 如果对象只有 marketplace_id 而没有实质内容，则视为无效
-                    if (Object.keys(result).length > 0 && !hasRealValue && result.marketplace_id) {
+                    // 如果对象里面只有 selectors (如 marketplace_id 或 language_tag) 而没有其他业务字段，视为无效废壳
+                    if (Object.keys(result).length > 0 && !hasRealValue) {
                         return undefined;
                     }
 
